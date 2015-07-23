@@ -887,6 +887,35 @@ deploy_to_releases() {
   fi
 }
 
+# When generating the source package on jessie this might result in a *.tar.xz
+# file. But when building the binary package for an older release like wheezy
+# this might generate a *.tar.gz file.  When directly copying those files into
+# reprepro's incoming directory (e.g. for release builds) the *unused* tarball
+# will be kept around, to avoid that you can enable DROP_UNUSED_DEBFILES to
+# remove the unused tarball so it doesn't end up as artifact at all
+drop_unused_debfiles() {
+  if [ "${DROP_UNUSED_DEBFILES:-}" != "true" ] ; then
+    return 0
+  fi
+
+  echo "*** DROP_UNUSED_DEBFILES is enabled, removing all unreferred artifact files. ***"
+  (
+    # get rid of tarball from source build
+    cd "$WORKSPACE"
+    rm -f *"_${newest_version}.tar."*
+
+    # get rid of *unused* tarball from binary build
+    cd "${WORKSPACE}/binaries/"
+    for file in ./* ; do
+      filename="$(basename "${file}")" # get rid of trailing ./
+      if ! dcmd ./*.changes | grep -q -- "${filename}" ; then
+        echo "*** Removing file ${filename} ***"
+        rm -f "./${filename}"
+      fi
+    done
+  )
+}
+
 # make them available for the Jenkin's 'Archiving artifacts'
 binaries_to_workspace() {
   echo "*** Moving binaries files to workspace. ***"
@@ -920,6 +949,7 @@ else
   deploy_to_releases
 fi
 
+drop_unused_debfiles
 binaries_to_workspace
 autopkg_run
 autopkgtest_results
