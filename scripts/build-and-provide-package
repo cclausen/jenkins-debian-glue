@@ -1,6 +1,8 @@
 #!/bin/bash
 
-set -x
+if [ -z ${JENKINS_DEBIAN_GLUE_QUIET:-} ]; then
+  set -x
+fi
 set -u
 
 # make sure cowbuilder/pbuilder/... are available
@@ -515,7 +517,7 @@ cowbuilder_run() {
         local trusted="[trusted=yes]"
       fi
       cat > /tmp/apt-$$/release.list <<EOF
-deb ${trusted} file://${REPOSITORY} ${release} ${components}
+deb ${trusted} file://${REPOSITORY} ${distribution} ${components}
 EOF
     fi
 
@@ -612,7 +614,7 @@ remove_packages() {
   fi
 
   echo "*** Removing source package version from repository ***"
-  ${SUDO_CMD:-} reprepro -A source -b "${REPOSITORY}" ${REPREPRO_OPTS} remove "${REPOS}" "${SOURCE_PACKAGE}"
+  ${SUDO_CMD:-} reprepro -A source -b "${REPOSITORY}" ${REPREPRO_OPTS} remove "${distribution}" "${SOURCE_PACKAGE}"
 
   echo "*** Removing previous binary package versions from repository ***"
   for p in $(list_deb_files "${WORKSPACE}/binaries/"*"_${newest_version}_${arch}.changes") ; do
@@ -636,10 +638,10 @@ remove_packages() {
     elif echo "$file" | egrep -q '_all.deb$'; then
       # note: "removesrc" would remove foreign arch files (of different builds)
       echo "*** Removing existing package ${binpackage} from repository ${REPOS} (arch all) ***"
-      ${SUDO_CMD:-} reprepro -b "${REPOSITORY}" ${REPREPRO_OPTS} remove "${REPOS}" "${binpackage}"
+      ${SUDO_CMD:-} reprepro -b "${REPOSITORY}" ${REPREPRO_OPTS} remove "${distribution}" "${binpackage}"
     else
       echo "*** Removing existing package ${binpackage} from repository ${REPOS} for arch ${arch} ***"
-      ${SUDO_CMD:-} reprepro -A "${arch}" -b "${REPOSITORY}" ${REPREPRO_OPTS} remove "${REPOS}" "${binpackage}"
+      ${SUDO_CMD:-} reprepro -A "${arch}" -b "${REPOSITORY}" ${REPREPRO_OPTS} remove "${distribution}" "${binpackage}"
     fi
 
   done
@@ -800,6 +802,35 @@ trunk_release() {
   fi
 }
 
+# Get rid of *unused* files to avoid uploading unreferenced files to incoming
+# directory. When generating the source package on jessie this might result in
+# a *.tar.xz file. But when building the binary package for an older release
+# like wheezy this might generate a *.tar.gz file. When directly copying those
+# files into reprepro's incoming directory (e.g. for release builds) the
+# *unused* tarball will be kept around, so let's avoid that.
+drop_unused_debfiles() {
+  if [ "${DROP_UNUSED_DEBFILES:-}" = "false" ] ; then
+    echo "*** DROP_UNUSED_DEBFILES is disabled, not removing unreferenced artifact files. ***"
+    return 0
+  fi
+
+  if ! [ -x "$(which dcmd)" ] ; then
+    echo "Error: dcmd executable not available, please install devscripts package." >&2
+    exit 1
+  fi
+
+  (
+    cd "${WORKSPACE}/binaries/"
+    for file in ./* ; do
+      filename="$(basename "${file}")" # get rid of trailing ./
+      if ! dcmd ./*.changes | grep -q -- "${filename}" ; then
+        echo "*** Removing file ${filename} ***"
+        rm -f "./${filename}"
+      fi
+    done
+  )
+}
+
 release_repos() {
   echo "*** Environment variable 'release' is set, running through release steps. ***"
 
@@ -817,10 +848,13 @@ release_repos() {
     REPOS="${release}" remove_packages
   fi
 
-  cp "${WORKSPACE}/binaries/"* "${REPOSITORY}/incoming/${release}/"
+  # get rid of files that aren't mentioned in the changes files before copying to incoming directory
+  drop_unused_debfiles
+
+  cp "${WORKSPACE}/binaries/"* "${REPOSITORY}/incoming/${distribution}/"
   [ $? -eq 0 ] || bailout 1 "Error: Failed to copy binary packages to release directory."
 
-  REPOSITORY=$REPOSITORY generate-reprepro-codename "${release}"
+  REPOSITORY=$REPOSITORY generate-reprepro-codename "${distribution}"
 
   # lock access to file to avoid duplicate entries when two build-and-provide-package
   # runs happen at the very same time with regard to conf/incoming setup
@@ -843,9 +877,9 @@ EOF
   ) 9>/var/lock/jdg-build-and-provide-incoming."$(id -un)" || bailout 1 "Error while setting up incoming repository."
 
   local old_dir=$(pwd)
-  cd "${REPOSITORY}/incoming/${release}"
+  cd "${REPOSITORY}/incoming/${distribution}"
   ${SUDO_CMD:-} reprepro -b "${REPOSITORY}" ${REPREPRO_OPTS} --ignore=wrongdistribution \
-                processincoming "${release}" "$(basename ${WORKSPACE}/binaries/*.changes)"
+                processincoming "${distribution}" "$(basename ${WORKSPACE}/binaries/*.changes)"
   local RC=$?
   cd "$old_dir"
 
